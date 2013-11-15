@@ -8,4 +8,4 @@ cleanr:
 	rm readDat
 
 clean:
-	rm lcr_regions
+	rm lcr_regions test.txt

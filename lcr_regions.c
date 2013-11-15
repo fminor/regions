@@ -1,28 +1,28 @@
 /*****************************************************************
-  Filename:  make_lcr_regions.c
-
-  read information from a qscat2b file 
-  (find land in L2B file to 
-	make regions to process using LCR)
-  Usage: make_lcr_regions <L2B filename> <Sector output filename>
-  
-  written by FDM at BYU 10/6/1013 based on read_qscat2b_2.c that was
-  written by DGL at BYU 1/20/2003 based on read_qscat2b.c
-
-******************************************************************/
+ * Filename:  make_lcr_regions.c
+ * read information from a qscat2b file 
+ * (find land in L2B file to 
+ * 	make regions to process using LCR)
+ * Usage: make_lcr_regions <L2B filename> <Sector output filename>
+ *
+ * written by FDM at BYU 10/6/1013 based on read_qscat2b_2.c that was
+ * written by DGL at BYU 1/20/2003 based on read_qscat2b.c
+ *
+ * code written to find land and make regions is marked by the 
+ * initials FDM in the comments (at least until the end of main)
+ * or F. D. Minor in function declaration comments
+ *****************************************************************/
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h> /* fmod */
 #include <hdf.h>
 
 #define MAX_ROWS 1624
 #define MAX_WVC 76
 #define MAX_AMBIG 4
 #define T_LENGTH 23
-
-#define MAX_NORTH 60 
-#define MAX_SOUTH 60
 
 #define min(a,b) ((a) <= (b) ? (a) : (b))
 #define max(a,b) ((a) >= (b) ? (a) : (b))
@@ -44,10 +44,16 @@ typedef struct{
 void get_timetags(char infile[1024],char timetags[MAX_ROWS][T_LENGTH]);
 void *get_mem(int32 dt,int32 numval);
 void getTextAfterNewline();
-int coastline_distance(float, float);
-void fill_array(float*, float*, int[][]);
-void fill_array2(float*, float*, int*, int[][]);
-void print_array(int[][]);
+
+/* function prototypes for targeting near coastal regions FDM */
+unsigned char coastline_distance(float, float);
+void readInt(char* fileName, unsigned char data[][MAX_WVC]);
+void readDbl(char* fileName, double data[][MAX_WVC]);
+void transposeLon(float*, double[][MAX_WVC]);
+void fill_array(double[][MAX_WVC],double[][MAX_WVC],
+		unsigned char [][MAX_WVC], int [][MAX_WVC]);
+void fill_array2(float*, float*, int*, int[][MAX_WVC]);
+void print_array(int [][MAX_WVC]);
 
 /* global variables for reading hdf file*/
 qsdata extract_sds(char *in_var,int irec,int slab_size);
@@ -60,6 +66,10 @@ int NSX2_coast=36000, NSY2_coast=18000;
 int NS_coast=36000*18000; /* =NSX2_coast*NSY2_coast */
 unsigned char *landdis;
 
+/* global variables for lat/lon data files */
+char zeroName[200] = "/auto/users/minor/src/data/zeroData.dat";
+char latName[200] = "/auto/users/minor/src/data/LRLat.dat";
+char lonName[200] = "/auto/users/minor/src/data/LRLon.dat";
 
 int main(int argc,char *argv[])
 {
@@ -71,25 +81,22 @@ int main(int argc,char *argv[])
   int chk, chk1;
 
   char timetags[MAX_ROWS][T_LENGTH];
-  int landmap[MAX_ROWS][MAX_WVC]; /* For L2B distances to land */
   FILE *imf;
 
   qsdatai wvc_row,wvc_index;
   qsdata wvc_lat,wvc_lon;
-//  qsdatai num_in_fore,num_in_aft,num_out_fore,num_out_aft;
   qsdatai wvc_quality_flag;
-//  qsdatai num_ambigs;
-//  qsdata model_speed,model_dir,atten_corr;
-//  qsdata wind_speed,wind_dir,wind_speed_err,wind_dir_err;
-//  qsdata max_likelihood_est;
-//  qsdatai wvc_selection;
-//  qsdata wind_speed_selection,wind_dir_selection;
-//  qsdata mp_rain_probability,nof_rain_index;
 
   int ir,slab_size;
   int itmp,irec1,irec2,incr2,incr3,iamb;
   int i,j;
   int iwvc_quality_flag;
+
+  /* Local variables for targeting near coastal regions FDM */
+  double LRLat[MAX_ROWS][MAX_WVC]; /* Estimated latitude */ 
+  double LRLon[MAX_ROWS][MAX_WVC]; /* Estimated longitude */
+  unsigned char zeroData[MAX_ROWS][MAX_WVC]; /* 1's represent areas unfit for processing */
+  int landmap[MAX_ROWS][MAX_WVC]; /* For L2B distances to land (values 0-255)*/
 
   /* Read the input filename */
   if (argv[1] == NULL){
@@ -105,7 +112,7 @@ int main(int argc,char *argv[])
 
   /* Read output filename */
   if (argv[2] == NULL){
-    printf("Enter the name of the output file:");
+    printf("Enter the name of the sector file:");
     fgets(line,sizeof(line),stdin);
     sscanf(line,"%s",fn);
     sectorname=fn;
@@ -113,7 +120,6 @@ int main(int argc,char *argv[])
   else{
     sectorname=argv[2];
   }	
-  printf("\nSector File: %s \n",sectorname);
 
 
   /* Read the timetag info contained in the HDF VDATA */
@@ -123,6 +129,7 @@ int main(int argc,char *argv[])
   sd_id = SDstart(filename, DFACC_RDONLY);
 
   /* Make sure that the file is a QuikSCAT Level 2B file */
+  printf("Verifying file is a QuikSCAT L2B file...\n");
   attr_index=SDfindattr(sd_id,"ShortName");
   retn=SDattrinfo(sd_id,attr_index,attr_name, &adata_type,&count);
   attr_data=(int8 *)malloc(count * DFKNTsize(adata_type));
@@ -139,12 +146,12 @@ int main(int argc,char *argv[])
   }
   
   /* Load landdis, the Land Distance file*/
+  printf("Reading land coast distance file: (%s)\n", landname);
   landdis = (unsigned char *) malloc(sizeof(unsigned char)*NS_coast);    
   if (landdis == NULL) {
       fprintf(stdout,"*** ERROR allocating land coast distance array ***\n");
       exit(-1);
   }
-  printf("Open land coast distance file: %s\n",landname);
   imf = fopen(landname,"r");
   if (imf == NULL) {
     fprintf(stdout,"*** ERROR: cannot open land distance file %s\n",landname);
@@ -159,98 +166,34 @@ int main(int argc,char *argv[])
   /* Read in wvc_row, wvc_lat, wvc_lon, and wvc_index in their entirety */
   /* Read each SDS in its entirety.  For an example of reading the */
   /* QuikSCAT SDS data in slabs, please refer to read_qscat2a.c.   */
+  printf("Reading in L2B data...\n");
   ir=0;
 
   wvc_row=extract_sds_i("wvc_row",ir,MAX_ROWS);
   wvc_lat=extract_sds("wvc_lat",ir,MAX_ROWS);
   wvc_lon=extract_sds("wvc_lon",ir,MAX_ROWS);
   wvc_index=extract_sds_i("wvc_index",ir,MAX_ROWS);
-//  num_in_fore=extract_sds_i("num_in_fore",ir,MAX_ROWS);
-//  num_in_aft=extract_sds_i("num_in_aft",ir,MAX_ROWS);
-//  num_out_fore=extract_sds_i("num_out_fore",ir,MAX_ROWS);
-//  num_out_aft=extract_sds_i("num_out_aft",ir,MAX_ROWS);
   wvc_quality_flag=extract_sds_i("wvc_quality_flag",ir,MAX_ROWS);
-//  atten_corr=extract_sds("atten_corr",ir,MAX_ROWS);
-//  model_speed=extract_sds("model_speed",ir,MAX_ROWS);
-//  model_dir=extract_sds("model_dir",ir,MAX_ROWS);
-//  num_ambigs=extract_sds_i("num_ambigs",ir,MAX_ROWS);
-//  wind_speed=extract_sds("wind_speed",ir,MAX_ROWS);
-//  wind_dir=extract_sds("wind_dir",ir,MAX_ROWS);
-//  wind_speed_err=extract_sds("wind_speed_err",ir,MAX_ROWS);
-//  wind_dir_err=extract_sds("wind_dir_err",ir,MAX_ROWS);
-//  max_likelihood_est=extract_sds("max_likelihood_est",ir,MAX_ROWS);
-//  wvc_selection=extract_sds_i("wvc_selection",ir,MAX_ROWS);
-//  wind_speed_selection=extract_sds("wind_speed_selection",ir,MAX_ROWS);
-//  wind_dir_selection=extract_sds("wind_dir_selection",ir,MAX_ROWS);
-//  mp_rain_probability=extract_sds("mp_rain_probability",ir,MAX_ROWS);
-//  nof_rain_index=extract_sds("nof_rain_index",ir,MAX_ROWS);
-  
-  /* Select wind vector cell rows to be written to the screen */
-/*  printf("\nEnter the first record number:");
-  fgets(line,sizeof(line),stdin);
-  sscanf(line,"%d",&irec1);
 
-  printf("Enter the last record number:");
-  fgets(line,sizeof(line),stdin);
-  sscanf(line,"%d",&irec2);
+  /* Read in LRLat, LRLon and zeroData into memory FDM */
+  printf("Reading in zero data(%s)...\n", zeroName);	
+  readInt(zeroName,zeroData);
+  printf("Reading in lat data(%s)...\n", latName);
+  readDbl(latName, LRLat);
+  printf("Reading in lon data(%s)...\n", lonName);
+  readDbl(lonName, LRLon);
+  transposeLon(wvc_lon.data, LRLon);
+  printf("Transpose reference: %f\n", LRLon[407][36]);
 
-  if (irec1 > irec2){
-    itmp=irec1;
-    irec1=irec2;
-    irec2=itmp;
-  }
-  if ((irec1 < 1) || (irec2 > MAX_ROWS)){
-    printf("ERROR: wvc rows must be between 1 and 1624 \n");
-    return(0);
-  }*/
-
-  /* Subtract 1 from irec1 and irec2 to adjust for C running
-     from 0 instead of 1 (so wvc_row 1 matches input of 1)   */
-
-//  for(ir=irec1-1; ir<irec2; ir++){
-
-    /* Print results to screen */
-
-//    printf("\nTIME: %s\n",timetags[ir]);
-//    printf("WVC ROW:  %5.0f \n",*(wvc_row.data+ir));
-
-//    printf("WVC#  WVC_Qual WVC_Latitude/Longitude  Selected Wind Vector NWP Wind Vector Num/Sel Ambig  DRE Wind Vector  MP_Rain NOF_Rain\n");
-
-/*    for (j=0; j<MAX_WVC; j++){
-      incr2=ir*MAX_WVC+j;
-      iamb=(*(wvc_selection.data+incr2));
-      incr3=(ir*MAX_WVC*MAX_AMBIG)+(j*MAX_AMBIG)+(iamb-1);
-
-      if(*(num_ambigs.data+incr2) > 0){
-	iwvc_quality_flag=*(wvc_quality_flag.data+incr2);
-	
-	printf("%2.0d     0X%4.4x       %6.2f   %6.2f      %6.2f   %6.2f    %6.2f   %6.2f     %2.0d   %2.0d   %6.2f   %6.2f  %6.2f  %6.2f\n",
-	       *(wvc_index.data+incr2),iwvc_quality_flag,
-	       *(wvc_lat.data+incr2),*(wvc_lon.data+incr2),
-	       *(wind_speed.data+incr3),*(wind_dir.data+incr3),
-	       *(model_speed.data+incr2),*(model_dir.data+incr2),
-	       *(num_ambigs.data+incr2),*(wvc_selection.data+incr2),
-	       *(wind_speed_selection.data+incr2),
-	       *(wind_dir_selection.data+incr2),
-	       *(mp_rain_probability.data+incr2),
-	       *(nof_rain_index.data+incr2));
-      }
-    }	*/
-//  }
-
-  /* Make 1624 x 76 array of land distances for L2B file */
-  //printf("Distance array \n");
-  //fill_array(wvc_lat.data, wvc_lon.data, landmap);
-  //print_array(landmap);
-  printf("Flag array \n");
-  fill_array2(wvc_lat.data, wvc_lon.data, wvc_quality_flag.data, landmap);
+  /* Make 1624 x 76 array of land distances for L2B file FDM */
+  printf("Making Distance array \n");
+  fill_array(LRLat, LRLon, zeroData, landmap);
   print_array(landmap);
-  /* 
-   * Make regions for sectorname file
-   * 
-   * */
+  //printf("Flag array \n");
+  //fill_array2(wvc_lat.data, wvc_lon.data, wvc_quality_flag.data, landmap);
+  //print_array(landmap);
 
-
+  /* Make regions for sectorname file FDM */
 
   /* Free up malloc'd memory */
   free(wvc_row.data);
@@ -258,50 +201,14 @@ int main(int argc,char *argv[])
   free(wvc_lon.data);
   free(wvc_index.data);
   free(landdis);
-//  free(num_in_fore.data);
-//  free(num_in_aft.data);
-//  free(num_out_fore.data);
-//  free(num_out_aft.data);
   free(wvc_quality_flag.data);
-//  free(atten_corr.data);
-//  free(model_speed.data);
-//  free(model_dir.data);
-//  free(num_ambigs.data);
-//  free(wind_speed.data);
-//  free(wind_dir.data);
-//  free(wind_speed_err.data);
-//  free(wind_dir_err.data);
-//  free(max_likelihood_est.data);
-//  free(wvc_selection.data);
-//  free(wind_speed_selection.data);
-//  free(wind_dir_selection.data);
-//  free(mp_rain_probability.data);
-//  free(nof_rain_index.data);
 
   wvc_row.data=NULL;
   wvc_lat.data=NULL;
   wvc_lon.data=NULL;
   wvc_index.data=NULL;
   landdis=NULL;
-//  num_in_fore.data=NULL;
-//  num_in_aft.data=NULL;
-//  num_out_fore.data=NULL;
-//  num_out_aft.data=NULL;
   wvc_quality_flag.data=NULL;
-//  atten_corr.data=NULL;
-//  model_speed.data=NULL;
-//  model_dir.data=NULL;
-//  num_ambigs.data=NULL;
-//  wind_speed.data=NULL;
-//  wind_dir.data=NULL;
-//  wind_speed_err.data=NULL;
-//  wind_dir_err.data=NULL;
-//  max_likelihood_est.data=NULL;
-//  wvc_selection.data=NULL;
-//  wind_speed_selection.data=NULL;
-//  wind_dir_selection.data=NULL;
-//  mp_rain_probability.data=NULL;
-//  nof_rain_index.data=NULL;
 
   SDend(sd_id);
 }
@@ -310,15 +217,15 @@ int main(int argc,char *argv[])
   * print_array
   * prints a 1624 x 76 array of ints
   * param array is the array we are printing
-  *
+  * FDM
   ***************************************************************/ 
 void print_array(int landmap[][MAX_WVC]){
 	int i,j;
-	printf("Entered print array\n");
 	for(i=0; i < MAX_ROWS; i++) {
-		//printf("R: %d ", i);
-		for(j = 0; j < MAX_WVC; j++) {
-			printf("%d ", landmap[i][j]);
+		j = 0;
+		printf("%d",landmap[i][j]);
+		for(j = 1; j < MAX_WVC; j++) {
+			printf(",%d", landmap[i][j]);
 		}
 		printf("\n");
 	}
@@ -334,25 +241,80 @@ void print_array(int landmap[][MAX_WVC]){
  * param int landmap[][MAX_WVC] is the matrix to fill with data
  * 	10/2013 F. D. Minor
  ****************************************************************/
-void fill_array(float* wvc_lat, float* wvc_lon, int landmap[][MAX_WVC]){
+void fill_array(double LRLat[][MAX_WVC], double LRLon[][MAX_WVC], 
+		unsigned char zeroData[][MAX_WVC], int landmap[][MAX_WVC]){
   float lat,lon;
-  int dist;
-  int ir,j,incr;
-  printf("Entered fill_array\n");
+  unsigned char dis;
+  int ir,j;
   for(ir=0; ir < MAX_ROWS; ir++) {
 	for(j=0; j < MAX_WVC; j++) {
-		//printf("R: %d C: %d ", ir, j);
-		incr = ir*MAX_WVC+j;
-		lat = *(wvc_lat+incr);
-		lon = *(wvc_lon+incr);
-		//printf("Lat: %f Lon: %f ", lat, lon);
-		dist = coastline_distance(lat, lon);
-		//printf("Dist: %d\n", dist);
-   		// !! Exclude values outside lat range
-		landmap[ir][j] = dist;		
+		if(!zeroData[ir][j]) {
+			lat = (float) LRLat[ir][j];
+			lon = (float) LRLon[ir][j];
+			dis = coastline_distance(lat,lon);
+			landmap[ir][j] = dis;
+		} else {
+			landmap[ir][j] = -1;
+		}		
 	}
   }
 }
+
+/*****************************************************************
+ * transposeLon
+ * transposes our LR Longitude estimation to overlay the L2B swath
+ * perfered reference is 407,36
+ * range extends to 407,[24-46] (in first equitorial crossing
+ * param qsdata wvc_lon
+ * param double LRLon
+ * 	11/2013 F. D. Minor
+ ****************************************************************/
+void transposeLon(float* wvc_lon, double LRLon[][MAX_WVC]){
+	double lon,ref,temp;
+	int ir,j,incr;
+	ir = 407; /* First equitorial crossing */
+	j = 36;
+	incr = ir * MAX_WVC + j;
+	ref = *(wvc_lon + incr);
+
+	if(!ref) /* Find valid value as reference */
+		for(j=24; j < 46; j++ && !ref) {
+			incr = ir * MAX_WVC + j;
+			ref = *(wvc_lon + incr);
+		}
+	if(!ref) {
+		ir = 1218; /* Second equitorial crossing */ 
+		j = 36;
+		incr = ir * MAX_WVC + j;
+		ref = *(wvc_lon + incr);
+	}
+	if(!ref) 
+		for(j=24; j < 46; j++ && !ref) {
+			incr = ir * MAX_WVC + j;
+			ref = *(wvc_lon + incr);
+		}
+	printf("Reference longitude at (%d,%d) is: %f\n", ir,j,ref);
+	
+	/* Adjust reference longitude (if not from 407,36) */
+	lon = LRLon[ir][j];
+	printf("Here, normalized lon is: %f\n", lon);
+	ref = ref - lon;
+	printf("New reference longitude: %f\n", ref);
+
+	/* Transpose LRLon by reference longitude */
+	for(ir=0; ir < MAX_ROWS; ir++) {
+		for(j=0; j < MAX_WVC; j++) {
+			temp = LRLon[ir][j] + ref;
+			if(temp > 360)
+				temp = temp - 360;
+			//printf("%d,", (int) temp);
+			LRLon[ir][j] = temp;
+		}
+		//printf("\n");
+	}
+
+}
+
 
 /*****************************************************************
  * fill_array2
@@ -368,7 +330,7 @@ void fill_array2(float* wvc_lat, float* wvc_lon, int* wvc_quality, int landmap[]
   int land;
   int ir,j,incr;
   int mask = 1 << 7;  /* For isolating the 7th bit */
-  printf("Entered fill_array\n");
+  printf("Entered fill_array2\n");
   for(ir=0; ir < MAX_ROWS; ir++) {
 	for(j=0; j < MAX_WVC; j++) {
 		//printf("R: %d C: %d ", ir, j);
@@ -387,6 +349,130 @@ void fill_array2(float* wvc_lat, float* wvc_lon, int* wvc_quality, int landmap[]
   }
 }
 
+
+/*****************************************************************
+ * readInt
+ * Reads in data from file and makes a 1624 x 76 array of ints
+ * that in this case represent zeroData
+ * the file is 1624 x 76 and is comma delimited 
+ * param char* fileName - File containting data
+ * param unsigned char data[][] - Array to store data
+ * 	11/2013 F. D. Minor
+ ****************************************************************/
+void readInt(char* fileName, unsigned char data[][MAX_WVC]){
+	FILE* file;
+	long fileSize;
+	size_t res;
+	int row,cell;
+	char* buffer; /* buffer to hold file data */
+	char *row_res, *cell_res; /* for tokenizing delimited data  */
+	char *saveptr1, *saveptr2;
+
+	/* Open filestream */	
+	file = fopen(fileName,"r");
+	if(file == NULL) {
+		printf("Failed to open zero data file");
+		exit(1);
+	}
+
+	/* Allocate space and read into buffer */
+	fseek(file,0,SEEK_END);
+	fileSize = ftell(file);	
+	rewind(file);
+
+	buffer = (char*) malloc(sizeof(char) * fileSize);
+	if(buffer == NULL){
+		printf("Memory Error \n");
+		exit(1);
+	}
+	
+	res = fread(buffer,1,fileSize,file);
+	if(res != fileSize){
+		printf("Reading Error");
+		exit(1);
+	}
+	
+	/* Read 0s and 1s into zeroData array */
+	row = 0;
+	row_res = strtok_r(buffer, "\n", &saveptr1);
+	while(row_res != NULL) {
+		cell = 0;
+		cell_res = strtok_r(row_res, ",", &saveptr2);
+		while(cell_res != NULL) {
+			data[row][cell] = atoi(cell_res);
+			cell_res = strtok_r(NULL, ",", &saveptr2);
+			cell++;
+		}
+		row++;
+		row_res = strtok_r(NULL, "\n", &saveptr1);
+	}	
+
+	fclose(file);
+	free(buffer);
+
+}
+
+/*****************************************************************
+ * readDbl
+ * Reads in data from file and makes a 1624 x 76 array of doubles
+ * that in this case represent low resolution lat and lon
+ * the file is 1624 x 76 and is comma delimited 
+ * param char* fileName - File containting data
+ * param double char data[][] - Array to store data
+ * 	11/2013 F. D. Minor
+ ****************************************************************/
+void readDbl(char* fileName, double data[][MAX_WVC]){
+	FILE* file;
+	long fileSize;
+	size_t res;
+	int row,cell;
+	char* buffer; /* buffer to hold file data */
+	char *row_res, *cell_res; /* for tokenizing delimited data  */
+	char *saveptr1, *saveptr2;
+
+	/* Open filestream */	
+	file = fopen(fileName,"r");
+	if(file == NULL) {
+		printf("\nFailed to open lat/lon data file\n");
+		exit(1);
+	}
+
+	/* Allocate space and read into buffer */
+	fseek(file,0,SEEK_END);
+	fileSize = ftell(file);	
+	rewind(file);
+
+	buffer = (char*) malloc(sizeof(char) * fileSize);
+	if(buffer == NULL){
+		printf("Memory Error \n");
+		exit(1);
+	}
+	
+	res = fread(buffer,1,fileSize,file);
+	if(res != fileSize){
+		printf("Reading Error");
+		exit(1);
+	}
+	
+	/* Read doubles into data array */
+	row = 0;
+	row_res = strtok_r(buffer, "\n", &saveptr1);
+	while(row_res != NULL) {
+		cell = 0;
+		cell_res = strtok_r(row_res, ",", &saveptr2);
+		while(cell_res != NULL) {
+			data[row][cell] = atof(cell_res);
+			cell_res = strtok_r(NULL, ",", &saveptr2);
+			cell++;
+		}
+		row++;
+		row_res = strtok_r(NULL, "\n", &saveptr1);
+	}	
+
+	fclose(file);
+	free(buffer);
+}
+
 /*****************************************************************
  * coastline_distance: 	a function that returns distance to land 
  * 			in km for any given lat and lon
@@ -399,7 +485,7 @@ void fill_array2(float* wvc_lat, float* wvc_lon, int* wvc_quality, int landmap[]
  * 	10/2013	F.D. Minor
  ****************************************************************/	
 
-int coastline_distance(float lat, float lon)
+unsigned char coastline_distance(float lat, float lon)
 {
   int n,dis;
   int i,j;
@@ -416,7 +502,7 @@ int coastline_distance(float lat, float lon)
   if (i>37999) i=0;
 
   n = j*NSX2_coast+i;
-  dis = (int) *(landdis+n);
+  dis = *(landdis+n);
 
   return(dis);
 }
